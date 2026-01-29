@@ -186,6 +186,22 @@ def get_futures_dict() -> "dict[str, Future[None]]":
     return st.session_state.workflow_futures
 
 
+def has_active_workflows() -> "bool":
+    """
+    checks if any workflow futures are still running.
+    Cleans up completed futures to prevent memory growth.
+    """
+    futures = get_futures_dict()
+    if not futures:
+        return False
+
+    completed_ids = [sid for sid, future in futures.items() if future.done()]
+    for sid in completed_ids:
+        del futures[sid]
+
+    return len(futures) > 0
+
+
 def get_ingestion_state() -> "dict[str, Any]":
     """
     gets or initializes ingestion state
@@ -699,23 +715,44 @@ def submit_workflow_task(
     logger.info(f"Submitted workflow task for {submission_id} to thread pool")
 
 
-@st.fragment(run_every="0.5s")
+def _on_new_conversation() -> "None":
+    """
+    callback for the New Conversation button
+    """
+    st.session_state.selected_submission = None
+
+
+def _on_select_conversation(conversation_id: "str") -> "None":
+    """
+    callback for selecting an existing conversation
+    """
+    st.session_state.selected_submission = conversation_id
+
+
+def _on_clear_all() -> "None":
+    """
+    callback for the Clear All Conversations button
+    """
+    st.session_state.active_submissions = []
+    st.session_state.selected_submission = None
+    st.session_state.conversations = {}
+
+
 def display_sidebar_conversations() -> "None":
     """
-    fragment that displays conversation list with auto-refresh for status updates
+    displays conversation list in the sidebar.
+    Status updates are driven by conditional polling in main().
     """
     col1, col2 = st.columns([4, 1])
     with col1:
         st.subheader("💬 Conversations")
     with col2:
-        if st.button("➕", help="New conversation", use_container_width=True):
-            st.session_state.selected_submission = None
-            # increment version to ensure clean UI state
-            st.session_state.conversation_version = (
-                st.session_state.get("conversation_version", 0) + 1
-            )
-            # full page rerun to update both sidebar and chat
-            st.rerun()
+        st.button(
+            "➕",
+            help="New conversation",
+            use_container_width=True,
+            on_click=_on_new_conversation,
+        )
 
     # initialize conversation tracking state
     if "active_submissions" not in st.session_state:
@@ -767,33 +804,19 @@ def display_sidebar_conversations() -> "None":
                 if st.session_state.selected_submission == conversation_id
                 else "secondary"
             )
-            if st.button(
+            st.button(
                 f"{status_icon} {question_preview}{exchange_count_str}",
                 key=f"select_{conversation_id}",
                 type=button_type,
                 use_container_width=True,
-            ):
-                st.session_state.selected_submission = conversation_id
-                # increment version to force full UI refresh
-                st.session_state.conversation_version = (
-                    st.session_state.get("conversation_version", 0) + 1
-                )
-                # full page rerun to update both sidebar and chat
-                st.rerun()
+                on_click=_on_select_conversation,
+                args=(conversation_id,),
+            )
     else:
         st.info("No conversations yet")
 
     # clear all conversations button
-    if st.button("Clear All Conversations"):
-        st.session_state.active_submissions = []
-        st.session_state.selected_submission = None
-        st.session_state.conversations = {}
-        # increment version to ensure complete UI refresh
-        st.session_state.conversation_version = (
-            st.session_state.get("conversation_version", 0) + 1
-        )
-        # full page rerun to update both sidebar and chat
-        st.rerun()
+    st.button("Clear All Conversations", on_click=_on_clear_all)
 
     st.divider()
 
@@ -814,14 +837,12 @@ def display_sidebar_conversations() -> "None":
         )
 
 
-@st.fragment(run_every="0.5s")
 def display_chat_fragment() -> "None":
     """
-    Fragment that displays chat messages with auto-refresh for active workflows
+    displays chat messages for the selected conversation.
+    Updates during active workflows are driven by conditional polling in main().
     """
-    # render conversation content with versioned key for clean refreshes
-    container_key = f"chat_area_{st.session_state.conversation_version}"
-    chat_container = st.container(key=container_key)
+    chat_container = st.container()
 
     with chat_container:
         if st.session_state.selected_submission:
@@ -980,11 +1001,7 @@ def main() -> "None":
     if "conversations" not in st.session_state:
         st.session_state.conversations = {}
 
-    # track conversation version to force full rerenders on switch
-    if "conversation_version" not in st.session_state:
-        st.session_state.conversation_version = 0
-
-    # render chat messages using fragment (auto-refreshes when workflows are active)
+    # render chat messages for selected conversation
     display_chat_fragment()
 
     # chat input at bottom (standard chat interface pattern)
@@ -1040,6 +1057,11 @@ def main() -> "None":
         # submit async workflow task
         submit_workflow_task(workflow, question, submission_id)
         # rerun to update sidebar with new conversation
+        st.rerun()
+
+    # conditional polling - only rerun when background workflows are active
+    if has_active_workflows():
+        time.sleep(0.5)
         st.rerun()
 
 
