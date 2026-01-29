@@ -165,16 +165,6 @@ def get_or_create_executor() -> "ThreadPoolExecutor":
     return st.session_state.thread_executor
 
 
-def get_tasks_dict() -> "Any":
-    """
-    gets tasks dictionary from session state (for ingestion)
-    """
-    if "async_tasks" not in st.session_state:
-        # structure to store running async tasks (ingestion only)
-        st.session_state.async_tasks = {}
-    return st.session_state.async_tasks
-
-
 def get_futures_dict() -> "dict[str, Future[None]]":
     """
     gets futures dictionary from session state
@@ -343,10 +333,7 @@ async def check_and_run_ingestion_if_needed() -> "None":
             ingestion_state["status"] = "running"
 
             loop = get_or_create_event_loop()
-            tasks = get_tasks_dict()
-            ingestion_task = loop.create_task(run_ingestion_pipeline())
-            # track ingestion task separately
-            tasks["__ingestion__"] = ingestion_task
+            loop.create_task(run_ingestion_pipeline())
             logger.info("Ingestion pipeline task submitted")
 
     except Exception as e:
@@ -420,9 +407,7 @@ async def run_ingestion_pipeline() -> "None":
         logger.error(f"Ingestion pipeline failed: {e}", exc_info=True)
 
 
-def _render_exchange_response(
-    state: "WorkflowState", AGENT_ICONS: "dict[str, str]"
-) -> "None":
+def _render_exchange_response(state: "WorkflowState") -> "None":
     """
     renders the agent response for a single exchange
     """
@@ -680,24 +665,6 @@ def run_workflow_task(
     _run_async_in_thread(run_workflow_task_async(workflow, question, submission_id))
 
 
-def progress_event_loop() -> "None":
-    """
-    progress the event loop to advance all pending tasks without blocking UI
-    (Used only for ingestion tasks)
-    """
-    loop = get_or_create_event_loop()
-    tasks = get_tasks_dict()
-
-    pending_tasks = [task for task in tasks.values() if not task.done()]
-
-    if pending_tasks:
-        # run event loop to progress async tasks without blocking UI
-        try:
-            loop.run_until_complete(asyncio.sleep(0))
-        except Exception as e:
-            logger.error(f"Error progressing event loop: {e}")
-
-
 def submit_workflow_task(
     workflow: "Workflow", question: "str", submission_id: "str"
 ) -> "None":
@@ -859,7 +826,7 @@ def display_chat_fragment() -> "None":
                 submission_id = exchange.get("submission_id", "")
                 current_state = submission_states.get(submission_id, exchange)
 
-                _render_exchange_response(current_state, AGENT_ICONS)
+                _render_exchange_response(current_state)
 
 
 def main() -> "None":
@@ -869,8 +836,6 @@ def main() -> "None":
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    # progress async tasks on each rerun
-    progress_event_loop()
 
     # check llama-stack health on first load
     llama_stack_status = get_llama_stack_status()
@@ -1059,124 +1024,14 @@ def main() -> "None":
         # rerun to update sidebar with new conversation
         st.rerun()
 
-    # conditional polling - only rerun when background workflows are active
+    # event-driven rerun: block until a background agent writes to submission_states.
+    # timeout ensures Streamlit can process queued user interactions (button clicks,
+    # chat input) since Python cannot interrupt a blocking Event.wait() call.
     if has_active_workflows():
-        time.sleep(0.5)
+        event_fired = submission_states.update_event.wait(timeout=0.3)
+        if event_fired:
+            submission_states.update_event.clear()
         st.rerun()
-
-
-def display_submission_details(submission_id: "str") -> "None":
-    """Display detailed information about a submission"""
-    state = submission_states.get(submission_id)
-
-    if not state:
-        st.error("Submission not found")
-        return
-
-    is_complete = state.get("workflow_complete", False)
-    decision = state.get("decision", "")
-    decision_lower = decision.lower()
-
-    # show workflow status with appropriate styling
-    if decision_lower == "error":
-        st.error("❌ Workflow Failed - Error occurred during processing")
-    elif decision_lower == "unsafe":
-        st.error("⚠️ Workflow Blocked - Content flagged by moderation")
-    elif decision_lower == "unknown":
-        st.error("❓ Workflow Failed - Unable to classify request")
-    elif is_complete:
-        st.success(f"✅ Workflow Complete - Decision: {decision.upper()}")
-    else:
-        # still processing - show refresh button
-        st.info(f"⏳ Processing... Current stage: {decision or 'Classifying'}")
-        if st.button("🔄 Refresh", key=f"refresh_{submission_id}"):
-            st.rerun()
-
-    st.markdown("### 📋 Submission Details")
-
-    # display submission metadata
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"**Submission ID:** `{submission_id}`")
-    with col2:
-        st.markdown(f"**Status:** {decision or 'Pending'}")
-
-    st.markdown("---")
-
-    with st.expander("📝 Input Question", expanded=True):
-        st.write(state.get("input", "N/A"))
-
-    agent_timings = state.get("agent_timings", {})
-    rag_query_time = state.get("rag_query_time", 0.0)
-
-    if agent_timings or rag_query_time > 0:
-        with st.expander("⏱️ Response Times", expanded=True):
-            # show individual agent processing times
-            if agent_timings:
-                st.markdown("**Agent Processing Times:**")
-                for agent_name, duration in agent_timings.items():
-                    st.metric(
-                        label=f"{agent_name} Agent",
-                        value=f"{duration:.2f}s",
-                    )
-
-            if rag_query_time > 0:
-                st.markdown("**Vector Store Query Time:**")
-                st.metric(
-                    label="RAG Query",
-                    value=f"{rag_query_time:.2f}s",
-                )
-
-            total_agent_time = sum(agent_timings.values()) if agent_timings else 0
-            if total_agent_time > 0:
-                st.markdown("**Total Processing Time:**")
-                st.metric(
-                    label="Total",
-                    value=f"{total_agent_time:.2f}s",
-                )
-
-    # display agent's response
-    if state.get("classification_message"):
-        with st.expander("🔍 Response", expanded=True):
-            active_agent = state.get("active_agent", "")
-            if active_agent:
-                st.markdown(f"**Handled by:** {active_agent} Department")
-            st.write(state["classification_message"])
-
-    # display RAG source documents if RAG was used
-    rag_sources = state.get("rag_sources", [])
-    if rag_sources:
-        with st.expander(
-            f"📚 RAG Sources ({len(rag_sources)} documents)", expanded=False
-        ):
-            for i, source in enumerate(rag_sources, 1):
-                filename = source.get("filename", source.get("file_name", "Unknown"))
-                github_url = source.get("url", "")
-                snippet = source.get("snippet", "")
-
-                # show filename with GitHub link if available
-                if github_url:
-                    st.markdown(f"**{i}.** [{filename}]({github_url})")
-                else:
-                    st.markdown(f"**{i}.** {filename}")
-
-                # show snippet preview if available
-                if snippet:
-                    st.caption(f"Excerpt: {snippet}")
-
-                if source.get("chunk_id"):
-                    st.caption(f"Chunk: {source['chunk_id']}")
-
-    if state.get("mcp_output"):
-        with st.expander("🔧 Preliminary Diagnostics", expanded=False):
-            st.code(state["mcp_output"], language="text")
-
-    if state.get("github_issue"):
-        with st.expander("🔗 GitHub Tracking Issue", expanded=True):
-            st.markdown(f"[{state['github_issue']}]({state['github_issue']})")
-
-    if st.checkbox("Show Raw State (Debug)", key=f"debug_{submission_id}"):
-        st.json(state)
 
 
 if __name__ == "__main__":
