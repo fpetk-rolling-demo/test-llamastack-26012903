@@ -970,6 +970,7 @@ def main() -> "None":
         st.session_state.conversations = {}
 
     # render chat messages for selected conversation
+    st.button("🔄 Refresh Chat", help="Manual Chat Refresh to see latest updates")
     display_chat_fragment()
 
     # chat input at bottom (standard chat interface pattern)
@@ -1027,8 +1028,9 @@ def main() -> "None":
         # rerun to update sidebar with new conversation
         st.rerun()
 
-    # Auto-update: lightweight fragment polls for background state changes.
-    # Only active while workflows are running; renders nothing visible.
+    # fragment polls for background state changes
+    # note:: only active while workflows are running;
+    # renders nothing visible.
     if has_active_workflows():
         _poll_for_updates()
 
