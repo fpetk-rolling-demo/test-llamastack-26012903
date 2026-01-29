@@ -328,13 +328,10 @@ async def check_and_run_ingestion_if_needed() -> "None":
             ingestion_state["pipelines"] = pipelines
             ingestion_state["vector_store_count"] = vector_store_count
         else:
-            # vector stores missing - start async ingestion in background
+            # vector stores missing - run ingestion to completion
             logger.info("Some vector stores missing, starting ingestion...")
             ingestion_state["status"] = "running"
-
-            loop = get_or_create_event_loop()
-            loop.create_task(run_ingestion_pipeline())
-            logger.info("Ingestion pipeline task submitted")
+            await run_ingestion_pipeline()
 
     except Exception as e:
         logger.error(f"Failed to check vector stores: {e}")
